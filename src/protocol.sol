@@ -12,6 +12,7 @@ contract Protocol is ReentrancyGuard {
     error protocol__overCollateralNotGiven();
     error Protocol__InvalidCollateralToken();
     error Protocol__InvalidBorrowingToken();
+    error Protocol__SufficientCollateralProvided();
 
     struct tokenData {
         uint256 lendingInterestRate;
@@ -99,7 +100,7 @@ contract Protocol is ReentrancyGuard {
         address borrowTokenAddress,
         uint256 depositAmount,
         uint256 borrowAmount
-    ) external nonReentrant ValidTokenAddress(borrowTokenAddress) ValidTokenAddress(depositTokenAddress) {
+    ) external ValidTokenAddress(borrowTokenAddress) ValidTokenAddress(depositTokenAddress) {
         if (depositTokenAddress == borrowTokenAddress) {
             revert();
         }
@@ -166,6 +167,8 @@ contract Protocol is ReentrancyGuard {
         if (!checkOverCollateral(user, 0, 0)) {
             userAccount[user].amountBorrowed = 0;
             userAccount[user].amountDeposited = 0;
+        } else {
+            revert Protocol__SufficientCollateralProvided();
         }
     }
 
