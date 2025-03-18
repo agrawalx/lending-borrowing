@@ -5,7 +5,7 @@ import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interf
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
-contract protocol is ReentrancyGuard {
+contract Protocol is ReentrancyGuard {
     // struct to keep track of token price, deposits, borrows
     error protocol__TokenNotSupported();
     error protocol__InsufficientFunds();
@@ -16,8 +16,7 @@ contract protocol is ReentrancyGuard {
     struct tokenData {
         uint256 lendingInterestRate;
         uint256 borrowingInterestRate;
-        uint256 tokenDeposited;
-        uint256 tokenBorrowed;
+        uint256 tokenInContract;
         address priceFeedAddress;
     }
 
@@ -27,7 +26,8 @@ contract protocol is ReentrancyGuard {
         uint256 interestEarned;
         address depositTokenAddress;
         address borrowTokenAddress;
-        uint256 timeOfDeposit; 
+        uint256 lastTimeOfDeposit;
+        uint256 lastTimeOfBorrow;
     }
 
     IERC20 tokenA;
@@ -55,16 +55,14 @@ contract protocol is ReentrancyGuard {
         reserves[address(tokenA)] = tokenData({
             lendingInterestRate: 5,
             borrowingInterestRate: 10,
-            tokenDeposited: 0,
-            tokenBorrowed: 0,
+            tokenInContract: 0,
             priceFeedAddress: priceFeedA
         });
 
         reserves[address(tokenB)] = tokenData({
             lendingInterestRate: 3,
             borrowingInterestRate: 9,
-            tokenDeposited: 0,
-            tokenBorrowed: 0,
+            tokenInContract: 0,
             priceFeedAddress: priceFeedB
         });
     }
@@ -85,9 +83,11 @@ contract protocol is ReentrancyGuard {
             }
         }
         // effects
-        userAccount[msg.sender].amountDeposited += amount;
-        reserves[tokenAddress].tokenDeposited += amount;
-        userAccount[msg.sender].timeOfDeposit = block.timestamp; 
+        uint256 amountToAdd = calculateInterestOnDeposit(tokenAddress, msg.sender);
+        userAccount[msg.sender].amountDeposited += amount + amountToAdd;
+        reserves[tokenAddress].tokenInContract += amount - amountToAdd;
+        userAccount[msg.sender].lastTimeOfDeposit = block.timestamp;
+        userAccount[msg.sender].interestEarned += amountToAdd;
         // interaction
         IERC20(tokenAddress).transferFrom(msg.sender, address(this), amount);
         emit Deposit(msg.sender, tokenAddress, amount);
@@ -121,30 +121,59 @@ contract protocol is ReentrancyGuard {
             revert protocol__overCollateralNotGiven();
         }
         // effects
+        uint256 interestOnBorrowed = calculateInterestOnBorrow(borrowTokenAddress, msg.sender);
         depositToken(depositTokenAddress, depositAmount);
-        userAccount[msg.sender].amountBorrowed += borrowAmount;
-        reserves[borrowTokenAddress].tokenBorrowed += borrowAmount;
+        userAccount[msg.sender].amountBorrowed += borrowAmount + interestOnBorrowed;
+        reserves[borrowTokenAddress].tokenInContract += borrowAmount;
+        userAccount[msg.sender].lastTimeOfBorrow = block.timestamp;
         // interactions
         IERC20(borrowTokenAddress).transfer(msg.sender, borrowAmount);
     }
     //WITHDRAW (user should get amountDeposited at the time of calling this function + interest earned)
+
     function withdraw(uint256 amount) public {
-        // check if this breaks overcollateral 
+        // check if this breaks overcollateral
+        if (amount > userAccount[msg.sender].amountDeposited) {
+            revert protocol__InsufficientFunds();
+        }
         address withdrawTokenAddress = userAccount[msg.sender].depositTokenAddress;
-        uint256 netDeposit = userAccount[msg.sender].amountDeposited - amount; 
+        uint256 netDeposit = userAccount[msg.sender].amountDeposited - amount;
         uint256 depositValueInUSD = ((getTokenPrice(userAccount[msg.sender].depositTokenAddress)) * netDeposit) / 1e8;
-        uint256 borrowedValueInUSD = ((getTokenPrice(userAccount[msg.sender].borrowTokenAddress)) * (userAccount[msg.sender].amountBorrowed)) / 1e8;
+        uint256 borrowedValueInUSD = (
+            (getTokenPrice(userAccount[msg.sender].borrowTokenAddress)) * (userAccount[msg.sender].amountBorrowed)
+        ) / 1e8;
         if ((depositValueInUSD * 100) >= (borrowedValueInUSD * 150)) {
             IERC20(withdrawTokenAddress).transfer(msg.sender, amount);
         }
+        uint256 interest = calculateInterestOnDeposit(withdrawTokenAddress, msg.sender);
+        userAccount[msg.sender].amountDeposited -= amount;
+        reserves[withdrawTokenAddress].tokenInContract -= (interest + amount);
+        userAccount[msg.sender].lastTimeOfDeposit = block.timestamp;
+        IERC20(withdrawTokenAddress).transfer(msg.sender, amount + interest);
     }
     //REPAY BORROWED ASSETS
 
-    function checkOverCollateral(
-        address user,
-        uint256 depositAmount,
-        uint256 borrowAmount
-    ) internal view returns (bool) {
+    function repay(uint256 amount, address tokenAddress) external ValidTokenAddress(tokenAddress) {
+        uint256 interestOnBorrow = calculateInterestOnBorrow(tokenAddress, msg.sender);
+        userAccount[msg.sender].amountBorrowed += interestOnBorrow;
+        userAccount[msg.sender].amountBorrowed -= amount;
+        reserves[tokenAddress].tokenInContract += amount;
+        userAccount[msg.sender].lastTimeOfBorrow = block.timestamp;
+        IERC20(tokenAddress).transferFrom(msg.sender, address(this), amount);
+    }
+
+    function liquidate(address user) public {
+        if (!checkOverCollateral(user, 0, 0)) {
+            userAccount[user].amountBorrowed = 0;
+            userAccount[user].amountDeposited = 0;
+        }
+    }
+
+    function checkOverCollateral(address user, uint256 depositAmount, uint256 borrowAmount)
+        internal
+        view
+        returns (bool)
+    {
         uint256 netDeposit = userAccount[user].amountDeposited + depositAmount;
         uint256 netBorrowed = userAccount[user].amountBorrowed + borrowAmount;
         uint256 depositValueInUSD = ((getTokenPrice(userAccount[user].depositTokenAddress)) * netDeposit) / 1e8;
@@ -158,7 +187,23 @@ contract protocol is ReentrancyGuard {
         return uint256(price);
     }
 
-    function calculateInterest(address token, address user) public {
-        userAccount[user].
+    function calculateInterestOnDeposit(address token, address user) public view returns (uint256) {
+        uint256 amount = userAccount[user].amountDeposited;
+        uint256 timeElapsed = block.timestamp - userAccount[user].lastTimeOfDeposit;
+        uint256 interestRatePerSecond = ((reserves[token].lendingInterestRate) * 1e18) / 31536000;
+        uint256 interest = (amount * interestRatePerSecond * timeElapsed) / 1e18;
+        return interest;
+    }
+
+    function calculateInterestOnBorrow(address token, address user) public view returns (uint256) {
+        uint256 amount = userAccount[user].amountBorrowed;
+        uint256 timeElapsed = block.timestamp - userAccount[user].lastTimeOfBorrow;
+        uint256 interestRatePerSecond = ((reserves[token].borrowingInterestRate) * 1e18) / 31536000;
+        uint256 interest = (amount * interestRatePerSecond * timeElapsed) / 1e18;
+        return interest;
+    }
+
+    function getDeposits() external view returns (uint256) {
+        return userAccount[msg.sender].amountDeposited;
     }
 }
