@@ -13,7 +13,7 @@ contract testProtocol is Test {
     ERC20Mock tokenA;
     ERC20Mock tokenB;
     address public USER = makeAddr("USER");
-    uint256 public constant STARTING_ERC20_BALANCE = 100000 ether;
+    uint256 public constant STARTING_ERC20_BALANCE = 1000000 ether;
     uint256 public constant STARTING_PROTOCOL_BALANCE = 100000 ether;
     uint256 public constant DEPOSIT = 2 ether;
 
@@ -45,11 +45,10 @@ contract testProtocol is Test {
     }
 
     function testBorrowAndRepay(uint256 borrowAmount, uint256 depositAmount) public {
-        vm.assume(depositAmount > borrowAmount);
-        vm.assume(depositAmount > 0 && depositAmount < 100000 ether);
+        vm.assume(depositAmount > borrowAmount && depositAmount < STARTING_ERC20_BALANCE / 2);
         vm.startPrank(USER);
         tokenB.approve(address(protocol), type(uint256).max);
         protocol.borrowToken(address(tokenB), address(tokenA), depositAmount, borrowAmount);
-        protocol.repay(borrowAmount / 2, address(tokenB));
+        protocol.repay(borrowAmount, address(tokenB));
     }
 }
