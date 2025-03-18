@@ -184,7 +184,7 @@ contract Protocol is ReentrancyGuard {
         return (depositValueInUSD * 100) >= (borrowedValueInUSD * 150);
     }
 
-    function getTokenPrice(address tokenAddress) internal view returns (uint256) {
+    function getTokenPrice(address tokenAddress) public view returns (uint256) {
         AggregatorV3Interface priceFeed = AggregatorV3Interface(reserves[tokenAddress].priceFeedAddress);
         (, int256 price,,,) = priceFeed.latestRoundData();
         return uint256(price);
@@ -208,5 +208,9 @@ contract Protocol is ReentrancyGuard {
 
     function getDeposits() external view returns (uint256) {
         return userAccount[msg.sender].amountDeposited;
+    }
+
+    function getReserve() external view returns (uint256, uint256) {
+        return (reserves[address(tokenA)].tokenInContract, reserves[address(tokenB)].tokenInContract);
     }
 }
